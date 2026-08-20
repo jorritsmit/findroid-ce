@@ -111,6 +111,7 @@ class DownloaderImpl(
         item: FindroidItem,
         sourceId: String,
         storageIndex: Int,
+        maxBitrate: Int?,
     ): Pair<Long, UiText?> = coroutineScope {
         val transcodeDolbyVision =
             appPreferences.getValue(appPreferences.downloadTranscodeDolbyVision)
@@ -139,8 +140,16 @@ class DownloaderImpl(
                 // Re-resolve the URL from the server (not persisted). Prefer the existing
                 // row's own source id so we resume the same source that was started; fall
                 // back to the first available source if it is no longer offered.
+                // The quality cap comes from the row, NOT the caller: the partial on
+                // disk was written at the row's quality, and mixing URL kinds would
+                // append mismatched bytes.
                 val sources = jellyfinRepository
-                    .getMediaSources(item.id, true, transcodeDolbyVision)
+                    .getMediaSources(
+                        item.id,
+                        true,
+                        transcodeDolbyVision,
+                        existingSource.downloadMaxBitrate,
+                    )
                 val source = sources.firstOrNull { it.id == existingSource.id }
                     ?: sources.firstOrNull()
                     ?: throw IllegalStateException("No media sources for ${item.name} on resume")
@@ -151,6 +160,7 @@ class DownloaderImpl(
                         destFile = File(existingSource.path),
                         allowMetered = allowMetered,
                         allowRoaming = allowRoaming,
+                        resumable = !source.transcoded,
                     )
                 )
                 // Resume external streams: restart any still-in-progress subtitle transfers.
@@ -173,7 +183,7 @@ class DownloaderImpl(
         try {
             val source =
                 jellyfinRepository
-                    .getMediaSources(item.id, true, transcodeDolbyVision)
+                    .getMediaSources(item.id, true, transcodeDolbyVision, maxBitrate)
                     .first { it.id == sourceId }
             val segments = jellyfinRepository.getSegments(item.id)
             val trickplayInfo =
@@ -228,6 +238,7 @@ class DownloaderImpl(
                     destFile = destFile,
                     allowMetered = allowMetered,
                     allowRoaming = allowRoaming,
+                    resumable = !source.transcoded,
                 )
             )
 
@@ -261,7 +272,9 @@ class DownloaderImpl(
 
             val sourceDto = source.toFindroidSourceDto(item.id, destFile.absolutePath)
 
-            database.insertSource(sourceDto.copy(downloadId = downloadId))
+            database.insertSource(
+                sourceDto.copy(downloadId = downloadId, downloadMaxBitrate = maxBitrate)
+            )
             database.insertUserData(item.toFindroidUserDataDto(jellyfinRepository.getUserId()))
 
             val resolvedStorageIndex = dirs.indexOf(storageLocation)
@@ -297,6 +310,7 @@ class DownloaderImpl(
     override suspend fun downloadItem(
         item: FindroidItem,
         storageIndex: Int,
+        maxBitrate: Int?,
     ): Pair<Long, UiText?> {
         val sources = try {
             jellyfinRepository.getMediaSources(
@@ -304,6 +318,7 @@ class DownloaderImpl(
                 includePath = true,
                 transcodeDolbyVision =
                     appPreferences.getValue(appPreferences.downloadTranscodeDolbyVision),
+                maxBitrate = maxBitrate,
             )
         } catch (e: Exception) {
             Timber.e(e, "Failed to resolve media sources for ${item.name}")
@@ -311,7 +326,12 @@ class DownloaderImpl(
         }
         val sourceId = sources.firstOrNull()?.id
             ?: return Pair(-1, UiText.StringResource(CoreR.string.download_error_no_sources))
-        return downloadItem(item = item, sourceId = sourceId, storageIndex = storageIndex)
+        return downloadItem(
+            item = item,
+            sourceId = sourceId,
+            storageIndex = storageIndex,
+            maxBitrate = maxBitrate,
+        )
     }
 
     override suspend fun cancelDownload(item: FindroidItem, downloadId: Long) {
@@ -571,29 +591,31 @@ class DownloaderImpl(
         }
     }
 
-    override suspend fun savePendingDownload(item: FindroidItem) = withContext(Dispatchers.IO) {
-        val kind =
-            when (item) {
-                is FindroidMovie -> "MOVIE"
-                is FindroidEpisode -> "EPISODE"
-                else -> return@withContext
-            }
-        database.insertPendingDownload(
-            dev.jdtech.jellyfin.models.PendingDownloadDto(
-                itemId = item.id,
-                itemKind = kind,
-                addedAt = System.currentTimeMillis(),
-            ),
-        )
-    }
+    override suspend fun savePendingDownload(item: FindroidItem, maxBitrate: Int?) =
+        withContext(Dispatchers.IO) {
+            val kind =
+                when (item) {
+                    is FindroidMovie -> "MOVIE"
+                    is FindroidEpisode -> "EPISODE"
+                    else -> return@withContext
+                }
+            database.insertPendingDownload(
+                dev.jdtech.jellyfin.models.PendingDownloadDto(
+                    itemId = item.id,
+                    itemKind = kind,
+                    addedAt = System.currentTimeMillis(),
+                    maxBitrate = maxBitrate,
+                ),
+            )
+        }
 
     override suspend fun removePendingDownload(itemId: UUID) = withContext(Dispatchers.IO) {
         database.deletePendingDownload(itemId)
     }
 
-    override suspend fun getPendingDownloads(): List<Pair<FindroidItem, Long>> = withContext(Dispatchers.IO) {
+    override suspend fun getPendingDownloads(): List<Downloader.PendingDownload> = withContext(Dispatchers.IO) {
         val pending = database.getPendingDownloads()
-        val result = mutableListOf<Pair<FindroidItem, Long>>()
+        val result = mutableListOf<Downloader.PendingDownload>()
         val cutoff = System.currentTimeMillis() - PENDING_DOWNLOAD_MAX_AGE_MS
         for (row in pending) {
             if (row.itemKind != "MOVIE" && row.itemKind != "EPISODE") {
@@ -614,7 +636,10 @@ class DownloaderImpl(
                     null
                 }
             when {
-                resolved != null -> result.add(resolved to row.addedAt)
+                resolved != null ->
+                    result.add(
+                        Downloader.PendingDownload(resolved, row.addedAt, row.maxBitrate)
+                    )
                 row.addedAt < cutoff -> {
                     Timber.i("Dropping stale pending download ${row.itemId} (>30 days unresolvable)")
                     database.deletePendingDownload(row.itemId)
@@ -625,10 +650,10 @@ class DownloaderImpl(
         result
     }
 
-    override suspend fun getActiveDownloads(): List<Pair<FindroidItem, Long>> = withContext(Dispatchers.IO) {
+    override suspend fun getActiveDownloads(): List<Downloader.ActiveDownload> = withContext(Dispatchers.IO) {
         val userId = jellyfinRepository.getUserId()
         val sources = database.getActiveDownloadSources()
-        val result = mutableListOf<Pair<FindroidItem, Long>>()
+        val result = mutableListOf<Downloader.ActiveDownload>()
         for (source in sources) {
             val downloadId = source.downloadId ?: continue
             val item: FindroidItem? =
@@ -641,7 +666,11 @@ class DownloaderImpl(
                         null
                     }
                 }
-            if (item != null) result.add(item to downloadId)
+            if (item != null) {
+                result.add(
+                    Downloader.ActiveDownload(item, downloadId, source.downloadMaxBitrate)
+                )
+            }
         }
         result
     }
