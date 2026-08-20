@@ -89,7 +89,10 @@ class DeviceProfileBuilder {
             transcodeDolbyVision -> buildDownloadTranscodeProfile()
             bitrateCapped ->
                 buildDirectPlayProfile()
-                    .copy(transcodingProfiles = DOWNLOAD_TRANSCODING_PROFILES)
+                    .copy(
+                        transcodingProfiles = DOWNLOAD_TRANSCODING_PROFILES,
+                        subtitleProfiles = DOWNLOAD_SUBTITLE_PROFILES,
+                    )
             else -> buildDirectPlayProfile()
         }
 
@@ -421,6 +424,22 @@ class DeviceProfileBuilder {
         )
 
         /**
+         * Subtitle handling for download transcodes: everything is delivered as
+         * an external sidecar, image formats included. Without the image entries
+         * the server's only option for a PGS/VobSub/DVB track is ENCODE (burn-in),
+         * which drags a GPU overlay filter chain (VAAPI + Vulkan/libplacebo) into
+         * the transcode — observed to wedge the encoder mid-stream and stall the
+         * download indefinitely.
+         */
+        private val DOWNLOAD_SUBTITLE_PROFILES = listOf(
+            SubtitleProfile("srt", SubtitleDeliveryMethod.EXTERNAL),
+            SubtitleProfile("ass", SubtitleDeliveryMethod.EXTERNAL),
+            SubtitleProfile("pgssub", SubtitleDeliveryMethod.EXTERNAL),
+            SubtitleProfile("dvdsub", SubtitleDeliveryMethod.EXTERNAL),
+            SubtitleProfile("dvbsub", SubtitleDeliveryMethod.EXTERNAL),
+        )
+
+        /**
          * The transcoding profile used for downloads. Uses HTTP — a single
          * continuous `.ts` stream — rather than HLS, because the app's single-URL
          * OkHttp downloader writes one contiguous file and cannot reassemble HLS
@@ -470,10 +489,7 @@ class DeviceProfileBuilder {
                     ),
                 ),
             ),
-            subtitleProfiles = listOf(
-                SubtitleProfile("srt", SubtitleDeliveryMethod.EXTERNAL),
-                SubtitleProfile("ass", SubtitleDeliveryMethod.EXTERNAL),
-            ),
+            subtitleProfiles = DOWNLOAD_SUBTITLE_PROFILES,
         )
     }
 }
