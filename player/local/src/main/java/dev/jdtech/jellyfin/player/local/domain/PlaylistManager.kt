@@ -200,6 +200,21 @@ class PlaylistManager @Inject internal constructor(private val repository: Jelly
         currentItemIndex = items.indexOfFirst { it.id == itemId }
     }
 
+    /**
+     * Re-resolve an already-queued item's media sources — used when the user
+     * changes the max streaming bitrate mid-playback, which invalidates every
+     * queued stream URL. The cached entry is replaced (not just added) so the
+     * duplicate check in [getPreviousPlayerItem]/[getNextPlayerItem] keeps
+     * treating the item as already queued.
+     */
+    suspend fun recreatePlayerItem(playerItem: PlayerItem): PlayerItem {
+        val item = items.firstOrNull { it.id == playerItem.itemId } ?: return playerItem
+        val recreated = item.toPlayerItem(null, playerItem.playbackPosition)
+        playerItems.removeAll { it.itemId == playerItem.itemId }
+        playerItems.add(recreated)
+        return recreated
+    }
+
     private suspend fun FindroidItem.toPlayerItem(
         mediaSourceIndex: Int?,
         playbackPosition: Long,
