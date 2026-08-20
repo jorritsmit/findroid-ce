@@ -349,12 +349,20 @@ class JellyfinRepositoryImpl(
             // direct-play profile. ExoPlayer gets the honest, hardware-probed profile so
             // the server transcodes anything it cannot direct-play — notably Dolby Vision.
             val useDirectPlay = appPreferences.getValue(appPreferences.playerBackend) == "mpv"
+            // User-selected bitrate cap (player quality selector). 0 = original quality.
+            // Files above the cap get a server-side transcode; files below it still
+            // direct-play. mpv's plain profile has no transcoding profiles, so a cap
+            // switches it to the variant that carries the HLS fallback.
+            val maxBitrate =
+                appPreferences.getValue(appPreferences.playerMaxBitrate).takeIf { it > 0 }
             val deviceProfile =
-                if (useDirectPlay) {
-                    deviceProfileBuilder.getDirectPlayProfile()
-                } else {
-                    deviceProfileBuilder.getDeviceProfile()
+                when {
+                    useDirectPlay && maxBitrate != null ->
+                        deviceProfileBuilder.getDirectPlayTranscodeFallbackProfile()
+                    useDirectPlay -> deviceProfileBuilder.getDirectPlayProfile()
+                    else -> deviceProfileBuilder.getDeviceProfile()
                 }
+            val enableTranscoding = !useDirectPlay || maxBitrate != null
             val sources = mutableListOf<FindroidSource>()
             sources.addAll(
                 jellyfinApi.mediaInfoApi
@@ -363,11 +371,12 @@ class JellyfinRepositoryImpl(
                         PlaybackInfoDto(
                             userId = currentUserId,
                             deviceProfile = deviceProfile,
-                            maxStreamingBitrate = deviceProfile.maxStreamingBitrate,
-                            enableTranscoding = !useDirectPlay,
+                            maxStreamingBitrate = maxBitrate
+                                ?: deviceProfile.maxStreamingBitrate,
+                            enableTranscoding = enableTranscoding,
                             allowVideoStreamCopy = true,
                             allowAudioStreamCopy = true,
-                            autoOpenLiveStream = !useDirectPlay,
+                            autoOpenLiveStream = enableTranscoding,
                         ),
                     )
                     .content
