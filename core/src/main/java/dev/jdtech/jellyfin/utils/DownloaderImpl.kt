@@ -217,13 +217,23 @@ class DownloaderImpl(
             // A leftover .download file from a previous failed/cancelled attempt with no DB
             // row is an orphan. Drop it before starting so the engine starts at byte 0.
             if (destFile.exists()) destFile.delete()
+            // source.size is always the original file size, even when a quality cap
+            // makes the server transcode to a smaller file — estimate the capped
+            // download's size from the bitrate cap instead of flagging false positives.
+            val expectedSize =
+                if (source.transcoded && maxBitrate != null) {
+                    val durationSeconds = item.runtimeTicks / 10_000_000.0
+                    (maxBitrate / 8.0 * durationSeconds).toLong()
+                } else {
+                    source.size
+                }
             val stats = StatFs(storageLocation.path)
-            if (stats.availableBytes < source.size) {
+            if (stats.availableBytes < expectedSize) {
                 return@coroutineScope Pair(
                     -1,
                     UiText.StringResource(
                         CoreR.string.not_enough_storage,
-                        Formatter.formatFileSize(context, source.size),
+                        Formatter.formatFileSize(context, expectedSize),
                         Formatter.formatFileSize(context, stats.availableBytes),
                     ),
                 )
