@@ -49,6 +49,7 @@ import kotlin.math.ceil
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import org.jellyfin.sdk.model.api.MediaStreamType
 import timber.log.Timber
 
 /**
@@ -439,7 +440,16 @@ class DownloaderImpl(
         // Fresh pass only: this is reached when no in-progress source row exists for the
         // item, so no external-stream rows exist yet. Resume of in-progress streams is
         // handled separately by resumeExternalMediaStreams().
-        for (mediaStream in source.mediaStreams.filter { it.isExternal }) {
+        //
+        // isExternal alone misses the common case: an *embedded* subtitle track that the
+        // server negotiated as an external delivery for THIS request (path already points
+        // at a working deliveryUrl). That negotiation always happens when the video is
+        // transcoded — the produced progressive stream carries no muxed subtitle tracks —
+        // so embedded subtitles must be fetched as sidecars whenever source.transcoded.
+        for (mediaStream in
+            source.mediaStreams.filter {
+                it.isExternal || (source.transcoded && it.type == MediaStreamType.SUBTITLE)
+            }) {
             val id = UUID.randomUUID()
             try {
                 val mediaStreamPath = mediaStream.path ?: continue
@@ -503,7 +513,10 @@ class DownloaderImpl(
             Timber.w(e, "Failed to load media streams for resume of ${item.name}")
             return
         }
-        val serverExternal = serverSource.mediaStreams.filter { it.isExternal }
+        val serverExternal =
+            serverSource.mediaStreams.filter {
+                it.isExternal || (serverSource.transcoded && it.type == MediaStreamType.SUBTITLE)
+            }
         for (row in rows) {
             if (!row.path.endsWith(".download")) continue // already finalized
             val downloadId = row.downloadId ?: continue
