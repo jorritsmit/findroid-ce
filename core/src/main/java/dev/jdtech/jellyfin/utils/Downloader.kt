@@ -22,6 +22,15 @@ interface Downloader {
 
     suspend fun cancelDownload(item: FindroidItem, downloadId: Long)
 
+    /**
+     * Restarts any still-incomplete external subtitle/media-stream downloads for [item]'s
+     * in-progress source whose engine task has failed or gone missing. Unlike the main
+     * video download, these sidecar downloads have no retry/backoff of their own — a
+     * transient failure otherwise permanently drops that subtitle track with no recovery.
+     * Cheap no-op when there is nothing incomplete, so safe to call periodically.
+     */
+    suspend fun retryFailedMediaStreams(item: FindroidItem)
+
     suspend fun deleteItem(item: FindroidItem, source: FindroidSource)
 
     /** Snapshot from the OkHttp download engine for a single download id. */
