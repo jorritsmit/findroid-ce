@@ -22,7 +22,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ./gradlew clean
 ```
 
-There are no lint or test commands currently in use — the project has minimal test infrastructure.
+## Checks and Tests (run in Docker)
+
+Run Gradle through `scripts/docker-gradle.sh` so you don't need a local JDK or Android SDK. It builds and caches a JDK 21 + Android SDK image from `docker/android-build/Dockerfile` (the same JDK as CI) and passes its arguments to `./gradlew`. It builds whichever checkout or worktree you run it from, and it finds the Dockerfile relative to itself, so you can also run it from another worktree against a branch that doesn't contain it.
+
+```bash
+# What CI runs (lint.yaml + build.yaml) — run before pushing
+scripts/docker-gradle.sh ktfmtCheck assembleDebug
+
+# Unit tests (core is the only library module with the libre flavor)
+scripts/docker-gradle.sh testDebugUnitTest :core:testLibreDebugUnitTest
+
+# Fix formatting
+scripts/docker-gradle.sh ktfmtFormat
+```
+
+When `COMPILE_SDK` or `BUILD_TOOLS` in `buildSrc/src/main/kotlin/Versions.kt` changes, update the `PLATFORM` / `BUILD_TOOLS` args in the Dockerfile to match. The script tags the image by the Dockerfile's hash, so it rebuilds automatically. The Gradle cache persists in `~/.cache/findroid-docker/gradle`.
 
 ## Module Structure
 
