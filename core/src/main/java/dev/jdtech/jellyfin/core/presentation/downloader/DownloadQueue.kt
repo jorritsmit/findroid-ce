@@ -19,6 +19,7 @@ import dev.jdtech.jellyfin.settings.domain.AppPreferences
 import dev.jdtech.jellyfin.utils.Downloader
 import dev.jdtech.jellyfin.utils.download.DownloadStatus
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Provider
 import javax.inject.Singleton
@@ -101,6 +102,11 @@ constructor(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
+
+    // Refreshed at most every MEDIA_STREAM_RETRY_INTERVAL_MS, keyed by downloadId, by a
+    // fire-and-forget check so the tight progress-polling loop below is never blocked on
+    // a network call.
+    private val lastMediaStreamRetryCheck = ConcurrentHashMap<Long, Long>()
     private var pumpJob: Job? = null
 
     /** Previous bytes + wall-clock (ms) sample per downloadId, for speed calc. */
@@ -392,6 +398,7 @@ constructor(
             if (lastSamples.isNotEmpty()) {
                 val activeDlIds = active.mapNotNull { it.downloadId }.toSet()
                 lastSamples.keys.retainAll(activeDlIds)
+                lastMediaStreamRetryCheck.keys.retainAll(activeDlIds)
             }
             if (active.isNotEmpty()) {
                 val updates = mutableMapOf<UUID, Entry>()
@@ -437,6 +444,26 @@ constructor(
                             snapshot.bytesDownloaded in 0 until originalSize
                     val effectiveTotal =
                         if (estimating) originalSize else snapshot.totalBytes
+                    // External subtitle/media-stream downloads have no retry/backoff of
+                    // their own (unlike this entry's video downloadId, tracked above) — a
+                    // transient failure otherwise permanently drops that subtitle track
+                    // with no recovery. Throttled and fire-and-forget so this network call
+                    // never blocks the poll loop; only while genuinely downloading, not
+                    // paused/offline.
+                    if (entry.state is EntryState.Downloading) {
+                        val lastCheck = lastMediaStreamRetryCheck[dlId] ?: 0L
+                        if (now - lastCheck >= MEDIA_STREAM_RETRY_INTERVAL_MS) {
+                            lastMediaStreamRetryCheck[dlId] = now
+                            val item = entry.item
+                            scope.launch {
+                                try {
+                                    downloader.retryFailedMediaStreams(item)
+                                } catch (e: Exception) {
+                                    Timber.w(e, "Failed to retry media streams for ${item.name}")
+                                }
+                            }
+                        }
+                    }
                     val newProgress =
                         if (estimating) {
                             // Cap at 99: the estimate may undershoot, and we only want
@@ -728,5 +755,8 @@ constructor(
         private const val MAX_AUTO_RETRIES = 3
         /** Backoff delays: 30s, 2m, 10m. */
         private val RETRY_BACKOFF_MS = longArrayOf(30_000L, 120_000L, 600_000L)
+
+        /** Minimum gap between checks for failed external subtitle/media-stream downloads. */
+        private const val MEDIA_STREAM_RETRY_INTERVAL_MS = 30_000L
     }
 }

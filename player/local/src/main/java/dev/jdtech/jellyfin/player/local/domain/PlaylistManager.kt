@@ -216,7 +216,14 @@ class PlaylistManager @Inject internal constructor(private val repository: Jelly
         val externalSubtitles =
             mediaSource.mediaStreams
                 .filter { mediaStream ->
-                    mediaStream.isExternal &&
+                    // isExternal reflects the *server's* original file layout, which only
+                    // matters for a REMOTE source riding along in the same stream ExoPlayer
+                    // is already playing. A LOCAL (downloaded) source only ever has a
+                    // mediastreams row for a subtitle that was saved as its own sidecar file
+                    // — downloadExternalMediaStreams never writes a row for a track that
+                    // stays muxed inside the downloaded video — so every row on a LOCAL
+                    // source is a real external file on disk, regardless of isExternal.
+                    (mediaSource.type == FindroidSourceType.LOCAL || mediaStream.isExternal) &&
                         mediaStream.type == MediaStreamType.SUBTITLE &&
                         !mediaStream.path.isNullOrBlank()
                 }

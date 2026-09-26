@@ -49,6 +49,7 @@ import kotlin.math.ceil
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import org.jellyfin.sdk.model.api.MediaStreamType
 import timber.log.Timber
 
 /**
@@ -439,7 +440,16 @@ class DownloaderImpl(
         // Fresh pass only: this is reached when no in-progress source row exists for the
         // item, so no external-stream rows exist yet. Resume of in-progress streams is
         // handled separately by resumeExternalMediaStreams().
-        for (mediaStream in source.mediaStreams.filter { it.isExternal }) {
+        //
+        // isExternal alone misses the common case: an *embedded* subtitle track that the
+        // server negotiated as an external delivery for THIS request (path already points
+        // at a working deliveryUrl). That negotiation always happens when the video is
+        // transcoded — the produced progressive stream carries no muxed subtitle tracks —
+        // so embedded subtitles must be fetched as sidecars whenever source.transcoded.
+        for (mediaStream in
+            source.mediaStreams.filter {
+                it.isExternal || (source.transcoded && it.type == MediaStreamType.SUBTITLE)
+            }) {
             val id = UUID.randomUUID()
             try {
                 val mediaStreamPath = mediaStream.path ?: continue
@@ -503,9 +513,95 @@ class DownloaderImpl(
             Timber.w(e, "Failed to load media streams for resume of ${item.name}")
             return
         }
-        val serverExternal = serverSource.mediaStreams.filter { it.isExternal }
+        restartExternalMediaStreamRows(
+            item = item,
+            // Process just died — every engine task is gone, so every still-incomplete
+            // row needs restarting, regardless of what state it was last left in.
+            rows = rows.filter { it.path.endsWith(".download") },
+            serverSource = serverSource,
+            allowMetered = allowMetered,
+            allowRoaming = allowRoaming,
+        )
+    }
+
+    /**
+     * Restarts any still-incomplete external subtitle/media-stream downloads for [item]'s
+     * in-progress source whose engine task has failed or gone missing. Unlike
+     * [resumeExternalMediaStreams] (unconditional — used right after process death when no
+     * engine task exists at all), this runs while the app is alive and must not touch rows
+     * that are still legitimately downloading/paused, or it would restart an in-flight
+     * transfer from zero for nothing.
+     *
+     * Finds the source the same way the resume branch of [downloadItem] does: the queue
+     * dedups by item id, so there is at most one in-progress (`.download`-suffixed) source
+     * per item.
+     */
+    override suspend fun retryFailedMediaStreams(item: FindroidItem) {
+        val dbSourceDto = try {
+            database.getSources(item.id).firstOrNull { source ->
+                source.path.endsWith(".download") && source.downloadId != null
+            }
+        } catch (e: Exception) {
+            Timber.w(e, "Failed to load source for media-stream retry check on ${item.name}")
+            return
+        } ?: return
+        val rows = try {
+            database.getMediaStreamsBySourceId(dbSourceDto.id)
+        } catch (e: Exception) {
+            Timber.w(e, "Failed to load media streams for retry check on ${item.name}")
+            return
+        }.filter { it.path.endsWith(".download") }
+        if (rows.isEmpty()) return
+        val failedRows =
+            engine.snapshots(rows.mapNotNull { it.downloadId }).let { snapshots ->
+                rows.filter { row ->
+                    val downloadId = row.downloadId ?: return@filter false
+                    // Missing from the map means the engine has no record of this id
+                    // (task died some other way) — treat the same as an explicit FAILED.
+                    snapshots[downloadId]?.status?.let { it == DownloadStatus.FAILED } ?: true
+                }
+            }
+        if (failedRows.isEmpty()) return
+        val serverSource = try {
+            jellyfinRepository
+                .getMediaSources(
+                    item.id,
+                    true,
+                    appPreferences.getValue(appPreferences.downloadTranscodeDolbyVision),
+                )
+                .firstOrNull { it.id == dbSourceDto.id }
+        } catch (e: Exception) {
+            Timber.w(e, "Failed to re-resolve source for media-stream retry on ${item.name}")
+            return
+        } ?: return
+        restartExternalMediaStreamRows(
+            item = item,
+            rows = failedRows,
+            serverSource = serverSource,
+            allowMetered = appPreferences.getValue(appPreferences.downloadOverMobileData),
+            allowRoaming = appPreferences.getValue(appPreferences.downloadWhenRoaming),
+        )
+    }
+
+    /**
+     * Shared restart logic for both [resumeExternalMediaStreams] (unconditional, process death)
+     * and [retryFailedMediaStreams] (only actually-failed rows, live retry). No stable id links
+     * a stored row to a server stream, so we match on type/language/codec/title — unique enough
+     * for real content. Subtitle files are tiny; a row whose server match cannot be found is
+     * simply dropped (its partial discarded).
+     */
+    private fun restartExternalMediaStreamRows(
+        item: FindroidItem,
+        rows: List<FindroidMediaStreamDto>,
+        serverSource: FindroidSource,
+        allowMetered: Boolean,
+        allowRoaming: Boolean,
+    ) {
+        val serverExternal =
+            serverSource.mediaStreams.filter {
+                it.isExternal || (serverSource.transcoded && it.type == MediaStreamType.SUBTITLE)
+            }
         for (row in rows) {
-            if (!row.path.endsWith(".download")) continue // already finalized
             val downloadId = row.downloadId ?: continue
             val url = serverExternal.firstOrNull { s ->
                 s.type == row.type &&
