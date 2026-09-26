@@ -60,6 +60,16 @@ class DeviceProfileBuilder {
     fun getDirectPlayProfile(): DeviceProfile = buildDirectPlayProfile()
 
     /**
+     * The mpv profile used when the user caps the streaming bitrate: still
+     * direct-play everything, but with the HLS transcoding profiles attached so
+     * the server has a transcode target for files whose bitrate exceeds the cap.
+     * Without them the plain direct-play profile leaves the server no way to
+     * honor a bitrate limit and playback info returns no usable source.
+     */
+    fun getDirectPlayTranscodeFallbackProfile(): DeviceProfile =
+        buildDirectPlayProfile().copy(transcodingProfiles = TRANSCODING_PROFILES)
+
+    /**
      * Profile for the downloader. With [transcodeDolbyVision] off this is just the
      * permissive direct-play profile (downloads stay original). With it on, Dolby
      * Vision is excluded from direct play and a progressive H.264 transcoding

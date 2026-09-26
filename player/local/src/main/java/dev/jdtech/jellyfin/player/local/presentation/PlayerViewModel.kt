@@ -128,6 +128,10 @@ constructor(
 
     var playbackSpeed: Float = 1f
 
+    /** Bitrate cap in bits per second, 0 = original quality. Mirrors [AppPreferences.playerMaxBitrate]. */
+    var maxBitrate: Int = 0
+        private set
+
     var isInPictureInPictureMode: Boolean = false
 
     // "Are you still watching?" — prompt fires after N consecutive auto-advanced episodes
@@ -148,6 +152,8 @@ constructor(
     private var pendingAutoAdvanceSeek = false
 
     init {
+        maxBitrate = appPreferences.getValue(appPreferences.playerMaxBitrate)
+
         val episodes = appPreferences.getValue(appPreferences.stillWatchingAfterEpisodes)
         val minutes = appPreferences.getValue(appPreferences.stillWatchingAfterMinutes)
         stillWatchingTracker =
@@ -711,6 +717,57 @@ constructor(
         markUserInteraction()
         player.setPlaybackSpeed(speed)
         playbackSpeed = speed
+    }
+
+    /**
+     * Change the max streaming bitrate (0 = original quality) and switch the
+     * running stream over to it. Every queued item's sources are re-resolved
+     * under the new cap — the server answers with a transcode URL for files
+     * above it — and the whole queue is swapped in place, preserving position
+     * and pause state. Works on both backends: ExoPlayer and MPVPlayer share
+     * the setMediaItems(items, index, position) + prepare() reload path.
+     *
+     * The playlist rebuild is done here explicitly instead of relying on
+     * onMediaItemTransition: MPVPlayer only emits a transition when the media
+     * *id* changes, which it does not on an in-place quality switch.
+     * PlaylistManager's cache entries are replaced by recreatePlayerItem, so
+     * when ExoPlayer does fire the transition its prev/next re-add finds the
+     * items already queued and adds nothing.
+     */
+    fun selectMaxBitrate(bitrate: Int) {
+        markUserInteraction()
+        if (bitrate == maxBitrate) return
+        val previousBitrate = maxBitrate
+        maxBitrate = bitrate
+        appPreferences.setValue(appPreferences.playerMaxBitrate, bitrate)
+
+        viewModelScope.launch {
+            val rebuilt =
+                try {
+                    items.map { playlistManager.recreatePlayerItem(it) }
+                } catch (e: Exception) {
+                    Timber.e(e)
+                    // Keep playing the current stream and roll the setting back so
+                    // the UI does not claim a quality that is not being delivered.
+                    maxBitrate = previousBitrate
+                    appPreferences.setValue(appPreferences.playerMaxBitrate, previousBitrate)
+                    Toast.makeText(application, e.localizedMessage, Toast.LENGTH_LONG).show()
+                    return@launch
+                }
+
+            // Same URLs for the whole queue (local file, or every source already
+            // below the cap) — nothing to reload, keep playing untouched.
+            if (rebuilt.map { it.mediaSourceUri } == items.map { it.mediaSourceUri }) {
+                items = rebuilt.toMutableList()
+                return@launch
+            }
+
+            val currentIndex = player.currentMediaItemIndex
+            val position = player.currentPosition
+            items = rebuilt.toMutableList()
+            player.setMediaItems(rebuilt.map { it.toMediaItem() }, currentIndex, position)
+            player.prepare()
+        }
     }
 
     private suspend fun getSegments(itemId: UUID) {
