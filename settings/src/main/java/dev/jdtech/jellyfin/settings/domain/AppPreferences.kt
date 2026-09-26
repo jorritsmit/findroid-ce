@@ -26,6 +26,11 @@ class AppPreferences @Inject constructor(val sharedPreferences: SharedPreference
     val playerBackend = Preference("pref_player_backend", "exoplayer")
     val playerBrightness = Preference("pref_player_brightness", -1.0f)
 
+    // Maximum streaming bitrate in bits per second; the server transcodes
+    // anything above it. 0 means no cap (original quality). Set from the
+    // player's quality selector.
+    val playerMaxBitrate = Preference("pref_player_max_bitrate", 0)
+
     // Player - mpv
     val playerMpv = Preference("pref_player_mpv", false)
     val playerMpvHwdec = Preference("pref_player_mpv_hwdec", "mediacodec")

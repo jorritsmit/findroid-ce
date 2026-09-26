@@ -312,12 +312,14 @@ class JellyfinRepositoryImpl(
         itemId: UUID,
         includePath: Boolean,
         transcodeDolbyVision: Boolean,
+        maxBitrate: Int?,
     ): List<FindroidSource> =
         withContext(Dispatchers.IO) {
             // The downloader's path. The profile direct-plays everything (→ original
-            // file) unless transcodeDolbyVision is set, in which case Dolby Vision is
-            // routed through a progressive H.264 transcode. Non-DV files stay original
-            // either way.
+            // file) unless transcodeDolbyVision is set (Dolby Vision routed through a
+            // progressive H.264 transcode) or the user picked a download quality cap
+            // (files over the cap transcoded down to it). Everything else stays the
+            // original file.
             val sources = mutableListOf<FindroidSource>()
             sources.addAll(
                 jellyfinApi.mediaInfoApi
@@ -326,11 +328,15 @@ class JellyfinRepositoryImpl(
                         PlaybackInfoDto(
                             userId = currentUserId,
                             deviceProfile =
-                                deviceProfileBuilder.getDownloadProfile(transcodeDolbyVision),
-                            maxStreamingBitrate = 1_000_000_000,
-                            enableTranscoding = transcodeDolbyVision,
-                            // Force a real video re-encode when DV transcodes — never
-                            // let the server copy the DV bitstream into the container.
+                                deviceProfileBuilder.getDownloadProfile(
+                                    transcodeDolbyVision,
+                                    bitrateCapped = maxBitrate != null,
+                                ),
+                            maxStreamingBitrate = maxBitrate ?: 1_000_000_000,
+                            enableTranscoding = transcodeDolbyVision || maxBitrate != null,
+                            // Force a real video re-encode when a transcode happens —
+                            // never let the server copy the DV bitstream into the
+                            // container, and never let a stream copy defeat the cap.
                             allowVideoStreamCopy = false,
                             allowAudioStreamCopy = true,
                         ),
@@ -349,12 +355,20 @@ class JellyfinRepositoryImpl(
             // direct-play profile. ExoPlayer gets the honest, hardware-probed profile so
             // the server transcodes anything it cannot direct-play — notably Dolby Vision.
             val useDirectPlay = appPreferences.getValue(appPreferences.playerBackend) == "mpv"
+            // User-selected bitrate cap (player quality selector). 0 = original quality.
+            // Files above the cap get a server-side transcode; files below it still
+            // direct-play. mpv's plain profile has no transcoding profiles, so a cap
+            // switches it to the variant that carries the HLS fallback.
+            val maxBitrate =
+                appPreferences.getValue(appPreferences.playerMaxBitrate).takeIf { it > 0 }
             val deviceProfile =
-                if (useDirectPlay) {
-                    deviceProfileBuilder.getDirectPlayProfile()
-                } else {
-                    deviceProfileBuilder.getDeviceProfile()
+                when {
+                    useDirectPlay && maxBitrate != null ->
+                        deviceProfileBuilder.getDirectPlayTranscodeFallbackProfile()
+                    useDirectPlay -> deviceProfileBuilder.getDirectPlayProfile()
+                    else -> deviceProfileBuilder.getDeviceProfile()
                 }
+            val enableTranscoding = !useDirectPlay || maxBitrate != null
             val sources = mutableListOf<FindroidSource>()
             sources.addAll(
                 jellyfinApi.mediaInfoApi
@@ -363,11 +377,12 @@ class JellyfinRepositoryImpl(
                         PlaybackInfoDto(
                             userId = currentUserId,
                             deviceProfile = deviceProfile,
-                            maxStreamingBitrate = deviceProfile.maxStreamingBitrate,
-                            enableTranscoding = !useDirectPlay,
+                            maxStreamingBitrate = maxBitrate
+                                ?: deviceProfile.maxStreamingBitrate,
+                            enableTranscoding = enableTranscoding,
                             allowVideoStreamCopy = true,
                             allowAudioStreamCopy = true,
-                            autoOpenLiveStream = !useDirectPlay,
+                            autoOpenLiveStream = enableTranscoding,
                         ),
                     )
                     .content

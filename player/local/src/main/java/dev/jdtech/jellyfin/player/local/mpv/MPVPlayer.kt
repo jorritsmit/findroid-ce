@@ -720,6 +720,12 @@ class MPVPlayer(
         mpvLib.command(arrayOf("playlist-clear"))
         mpvLib.command(arrayOf("playlist-remove", "current"))
         internalMediaItems = mediaItems
+        // The old playlist is gone, so the tracked index no longer refers to
+        // anything. prepare() loads the new index 0 with "replace", making 0
+        // the effective playing position; without this reset a stale index
+        // equal to startWindowIndex makes prepareMediaItem skip the
+        // playlist-play-index command and the wrong entry keeps playing.
+        currentMediaItemIndex = 0
         initialIndex = startWindowIndex
         initialSeekTo = startPositionMs
     }
