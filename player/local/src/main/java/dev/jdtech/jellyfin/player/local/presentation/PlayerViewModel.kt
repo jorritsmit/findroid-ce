@@ -217,9 +217,17 @@ constructor(
         val playerBackend = appPreferences.getValue(appPreferences.playerBackend)
         player = when (playerBackend) {
             "exoplayer" -> {
+                // PREFER (not ON) so the bundled ffmpeg extension decodes audio ahead of
+                // the platform MediaCodec: hardware Dolby decoders can advertise eac3
+                // support yet fatally reject DD+ Atmos streams ("unsupported DDP-JOC
+                // frame" on Pixel 8), killing playback. ffmpeg decodes the DD+ core and
+                // ignores the JOC extension, like mpv. Only audio is affected — the
+                // ffmpeg extension has no video decoders, so video stays on hardware.
                 val renderersFactory =
                     DefaultRenderersFactory(application)
-                        .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
+                        .setExtensionRendererMode(
+                            DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
+                        )
                 ExoPlayer.Builder(application, renderersFactory)
                     .setAudioAttributes(audioAttributes, true)
                     .setTrackSelector(trackSelector)
