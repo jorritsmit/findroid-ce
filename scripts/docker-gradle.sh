@@ -30,7 +30,9 @@ mounts=(-v "$root:$root")
 tty=()
 [[ -t 0 && -t 1 ]] && tty=(-it)
 
-exec docker run --rm "${tty[@]}" \
+# Host network: Gradle asks the holder of a shared-cache lock to release it over localhost
+# UDP, so concurrent runs (e.g. several worktrees) must share a loopback interface.
+exec docker run --rm "${tty[@]}" --network host \
   --user "$(id -u):$(id -g)" -e HOME=/tmp -e GRADLE_USER_HOME=/gradle \
   -v "$cache:/gradle" "${mounts[@]}" -w "$root" \
   "$image" ./gradlew --no-daemon "$@"
