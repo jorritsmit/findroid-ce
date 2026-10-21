@@ -21,7 +21,9 @@ if ! docker image inspect "$image" >/dev/null 2>&1; then
 fi
 
 cache="${XDG_CACHE_HOME:-$HOME/.cache}/findroid-docker/gradle"
-mkdir -p "$cache"
+# Debug keystore lives here, so every debug build is signed with the same key and installs
+# over the previous one instead of needing an uninstall.
+mkdir -p "$cache/android-user"
 
 # Mount at identical paths; a worktree's .git file points into the main repo's .git dir.
 mounts=(-v "$root:$root")
@@ -33,6 +35,6 @@ tty=()
 # Host network: Gradle asks the holder of a shared-cache lock to release it over localhost
 # UDP, so concurrent runs (e.g. several worktrees) must share a loopback interface.
 exec docker run --rm "${tty[@]}" --network host \
-  --user "$(id -u):$(id -g)" -e HOME=/tmp -e GRADLE_USER_HOME=/gradle \
+  --user "$(id -u):$(id -g)" -e HOME=/tmp -e GRADLE_USER_HOME=/gradle -e ANDROID_USER_HOME=/gradle/android-user \
   -v "$cache:/gradle" "${mounts[@]}" -w "$root" \
   "$image" ./gradlew --no-daemon "$@"
