@@ -84,7 +84,7 @@ constructor(
         /**
          * True when [totalBytes] is an estimate rather than a figure from
          * the download engine — happens for transcodes, whose length is not known
-         * up front so we fall back to the item's original file size.
+         * up front so we use the bitrate cap and runtime, or the original file size.
          */
         val totalBytesEstimated: Boolean = false,
         /** True when the server is transcoding this download (e.g. Dolby Vision). */
@@ -441,18 +441,17 @@ constructor(
                             // Treat as failed rather than silently claiming success.
                             else -> EntryState.Failed(null)
                         }
-                    // A server-side transcode (e.g. a Dolby Vision download) streams
-                    // output of unknown length, so the engine reports totalBytes=-1.
-                    // Fall back to the item's original file size as an estimate, so the
-                    // UI can show an approximate %/ETA instead of a frozen 0%.
-                    val originalSize =
-                        (entry.item as? FindroidSources)?.sources?.maxOfOrNull { it.size } ?: 0L
+                    val progress =
+                        snapshot.withEstimatedTotal(
+                            originalSize =
+                                (entry.item as? FindroidSources)?.sources?.maxOfOrNull { it.size }
+                                    ?: 0L,
+                            maxBitrate = entry.maxBitrate,
+                            runtimeTicks = entry.item.runtimeTicks,
+                        )
                     val estimating =
-                        snapshot.totalBytes <= 0L &&
-                            originalSize > 0L &&
-                            snapshot.bytesDownloaded in 0 until originalSize
-                    val effectiveTotal =
-                        if (estimating) originalSize else snapshot.totalBytes
+                        snapshot.totalBytes <= 0L && progress.totalBytes > 0L
+                    val effectiveTotal = progress.totalBytes
                     // External subtitle/media-stream downloads have no retry/backoff of
                     // their own (unlike this entry's video downloadId, tracked above) — a
                     // transient failure otherwise permanently drops that subtitle track
@@ -473,16 +472,7 @@ constructor(
                             }
                         }
                     }
-                    val newProgress =
-                        if (estimating) {
-                            // Cap at 99: the estimate may undershoot, and we only want
-                            // to show 100% once the download has genuinely completed.
-                            (snapshot.bytesDownloaded * 100 / originalSize)
-                                .toInt()
-                                .coerceIn(0, 99)
-                        } else {
-                            snapshot.progress.coerceAtLeast(0).coerceAtMost(100)
-                        }
+                    val newProgress = progress.progress.coerceIn(0, 100)
                     val speedSample =
                         nextDownloadSpeed(
                             prevSample = lastSamples[dlId],
@@ -774,4 +764,27 @@ constructor(
         /** Minimum gap between checks for failed external subtitle/media-stream downloads. */
         private const val MEDIA_STREAM_RETRY_INTERVAL_MS = 30_000L
     }
+}
+
+/** Estimate unknown-length downloads without replacing totals reported by the server. */
+internal fun Downloader.Progress.withEstimatedTotal(
+    originalSize: Long,
+    maxBitrate: Int?,
+    runtimeTicks: Long,
+): Downloader.Progress {
+    if (totalBytes > 0L || bytesDownloaded < 0L) return this
+    val estimatedSize =
+        if (maxBitrate != null && maxBitrate > 0 && runtimeTicks > 0L) {
+            val durationSeconds = runtimeTicks / 10_000_000.0
+            val cappedSize = (maxBitrate / 8.0 * durationSeconds).toLong()
+            if (originalSize > 0L) minOf(originalSize, cappedSize) else cappedSize
+        } else {
+            originalSize
+        }
+    if (estimatedSize <= 0L) return this
+    return copy(
+        totalBytes = estimatedSize,
+        // The output may exceed the estimate. Reserve 100% for confirmed completion.
+        progress = (bytesDownloaded * 100.0 / estimatedSize).toInt().coerceIn(0, 99),
+    )
 }

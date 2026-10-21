@@ -75,6 +75,35 @@ Grab the latest APK from the [Releases](https://github.com/midasvo/findroid-ce/r
 > Findroid CE uses its own application ID (`nl.midasvo.findroid.ce`), so it installs alongside the
 > original Findroid rather than replacing it.
 
+## Build from source
+
+Use JDK 21 (the same version as CI), Android SDK Platform 37, and Android SDK Build-Tools 37.0.0.
+Install the SDK packages through Android Studio's SDK Manager and accept their licences. The
+repository includes the Gradle wrapper, so a separate Gradle installation is not needed.
+
+Set `JAVA_HOME` to your JDK 21 installation and `ANDROID_HOME` to your Android SDK directory.
+Alternatively, put `sdk.dir=/absolute/path/to/Android/Sdk` in an untracked `local.properties` file.
+On Arch Linux, JDK 21 is normally installed at `/usr/lib/jvm/java-21-openjdk`.
+
+```bash
+# Build debug APKs for both phone and TV.
+./gradlew assembleDebug
+
+# Build only the phone app.
+./gradlew :app:phone:assembleLibreDebug
+
+# Run the existing unit tests.
+./gradlew :core:testLibreDebugUnitTest :data:testDebugUnitTest \
+  :modes:film:testDebugUnitTest :player:local:testDebugUnitTest
+```
+
+The first build downloads Gradle and Maven dependencies. Debug APKs are signed with a local debug
+key and written to `app/phone/build/outputs/apk/libre/debug/` and
+`app/tv/build/outputs/apk/libre/debug/`, with one APK per CPU architecture. Build directories,
+Gradle/Kotlin caches, and `local.properties` are ignored by Git. Use the `arm64-v8a` APK for most
+current Android devices. Release signing is configured separately using
+`keystore.properties.example` or the environment variables in the release workflow.
+
 ## Built on Findroid
 
 Findroid CE is a fork — all the core functionality (the native UI, ExoPlayer & mpv playback, offline
