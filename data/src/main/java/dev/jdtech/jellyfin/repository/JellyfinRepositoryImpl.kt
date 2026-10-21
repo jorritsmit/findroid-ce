@@ -317,7 +317,7 @@ class JellyfinRepositoryImpl(
         withContext(Dispatchers.IO) {
             // The downloader's path. The profile direct-plays everything (→ original
             // file) unless transcodeDolbyVision is set (Dolby Vision routed through a
-            // progressive H.264 transcode) or the user picked a download quality cap
+            // progressive transcode) or the user picked a download quality cap
             // (files over the cap transcoded down to it). Everything else stays the
             // original file.
             val sources = mutableListOf<FindroidSource>()

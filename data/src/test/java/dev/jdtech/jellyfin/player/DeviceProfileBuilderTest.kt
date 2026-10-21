@@ -1,6 +1,7 @@
 package dev.jdtech.jellyfin.player
 
 import org.jellyfin.sdk.model.api.MediaStreamProtocol
+import org.jellyfin.sdk.model.api.ProfileConditionType
 import org.jellyfin.sdk.model.api.ProfileConditionValue
 import org.jellyfin.sdk.model.api.SubtitleDeliveryMethod
 import org.junit.Assert.assertEquals
@@ -218,5 +219,64 @@ class DeviceProfileBuilderTest {
         val transcode = profile.transcodingProfiles.single()
         assertEquals(MediaStreamProtocol.HTTP, transcode.protocol)
         assertEquals("h264", transcode.videoCodec)
+    }
+
+    @Test
+    fun `capped downloads prefer HEVC with H264 fallback on compatible devices`() {
+        for (decoderProfile in listOf("Main", "Main 10", "Main 10 HDR 10")) {
+            val probed = ProbedCodecs(mapOf("hevc" to setOf(decoderProfile)), setOf("aac"))
+            val profile = DeviceProfileBuilder.buildDownloadProfile(probed, false, true)
+            val transcode = profile.transcodingProfiles.single()
+
+            assertEquals("hevc,h264", transcode.videoCodec)
+            assertEquals("ts", transcode.container)
+            assertEquals(MediaStreamProtocol.HTTP, transcode.protocol)
+            val bitDepth = transcode.conditions.single()
+            assertEquals(ProfileConditionValue.VIDEO_BIT_DEPTH, bitDepth.property)
+            assertEquals(ProfileConditionType.LESS_THAN_EQUAL, bitDepth.condition)
+            assertEquals("8", bitDepth.value)
+            // Downloading an original under the cap must remain unrestricted.
+            assertEquals(emptyList<Any>(), profile.codecProfiles)
+            assertTrue(profile.directPlayProfiles.all { it.container == "" })
+            assertTrue(profile.subtitleProfiles.all { it.method == SubtitleDeliveryMethod.EXTERNAL })
+            assertTrue(profile.subtitleProfiles.any { it.format == "pgssub" })
+        }
+    }
+
+    @Test
+    fun `missing HEVC video decoder support keeps H264 downloads`() {
+        for (hevcProfiles in listOf(null, emptySet(), setOf("Main Still"))) {
+            val probed = ProbedCodecs(
+                videoCodecProfiles = hevcProfiles?.let { mapOf("hevc" to it) }.orEmpty(),
+                audioCodecs = setOf("aac"),
+            )
+            val profile = DeviceProfileBuilder.buildDownloadProfile(probed, false, true)
+            val transcode = profile.transcodingProfiles.single()
+
+            assertEquals("h264", transcode.videoCodec)
+            assertEquals(emptyList<Any>(), transcode.conditions)
+            assertEquals(MediaStreamProtocol.HTTP, transcode.protocol)
+        }
+    }
+
+    @Test
+    fun `HEVC downloads retain Dolby Vision conversion and subtitle sidecars`() {
+        val probed = ProbedCodecs(mapOf("hevc" to setOf("Main")), setOf("aac"))
+        val profile = DeviceProfileBuilder.buildDownloadProfile(probed, true)
+        val original = DeviceProfileBuilder.buildDownloadTranscodeProfile()
+
+        assertEquals("hevc,h264", profile.transcodingProfiles.single().videoCodec)
+        assertEquals(original.codecProfiles, profile.codecProfiles)
+        assertEquals(original.subtitleProfiles, profile.subtitleProfiles)
+    }
+
+    @Test
+    fun `original quality downloads stay unchanged on HEVC capable devices`() {
+        val probed = ProbedCodecs(mapOf("hevc" to setOf("Main")), setOf("aac"))
+
+        assertEquals(
+            DeviceProfileBuilder.buildDirectPlayProfile(),
+            DeviceProfileBuilder.buildDownloadProfile(probed, false),
+        )
     }
 }

@@ -72,7 +72,7 @@ class DeviceProfileBuilder {
     /**
      * Profile for the downloader. With [transcodeDolbyVision] off this is just the
      * permissive direct-play profile (downloads stay original). With it on, Dolby
-     * Vision is excluded from direct play and a progressive H.264 transcoding
+     * Vision is excluded from direct play and a progressive transcoding
      * profile is offered, so DV files download as a device-compatible copy that
      * plays offline — every other file still downloads as the original.
      *
@@ -84,17 +84,7 @@ class DeviceProfileBuilder {
     fun getDownloadProfile(
         transcodeDolbyVision: Boolean,
         bitrateCapped: Boolean = false,
-    ): DeviceProfile =
-        when {
-            transcodeDolbyVision -> buildDownloadTranscodeProfile()
-            bitrateCapped ->
-                buildDirectPlayProfile()
-                    .copy(
-                        transcodingProfiles = DOWNLOAD_TRANSCODING_PROFILES,
-                        subtitleProfiles = DOWNLOAD_SUBTITLE_PROFILES,
-                    )
-            else -> buildDirectPlayProfile()
-        }
+    ): DeviceProfile = buildDownloadProfile(probedCodecs, transcodeDolbyVision, bitrateCapped)
 
     /**
      * The [MediaCodecList] probe result this builder was constructed with.
@@ -456,6 +446,40 @@ class DeviceProfileBuilder {
                 conditions = emptyList(),
             ),
         )
+
+        internal fun buildDownloadProfile(
+            probed: ProbedCodecs,
+            transcodeDolbyVision: Boolean,
+            bitrateCapped: Boolean = false,
+        ): DeviceProfile {
+            val profile =
+                if (transcodeDolbyVision) buildDownloadTranscodeProfile()
+                else buildDirectPlayProfile()
+            if (!transcodeDolbyVision && !bitrateCapped) return profile
+
+            val supportsHevc = probed.videoCodecProfiles["hevc"].orEmpty().any {
+                it == "Main" || it.startsWith("Main 10")
+            }
+            return profile.copy(
+                transcodingProfiles = DOWNLOAD_TRANSCODING_PROFILES.map { transcode ->
+                    if (!supportsHevc) transcode
+                    else transcode.copy(
+                        // Jellyfin falls back to H.264 when HEVC encoding is disabled.
+                        videoCodec = "hevc,h264",
+                        // Main-capable decoders can play this even without Main 10 support.
+                        conditions = listOf(
+                            ProfileCondition(
+                                condition = ProfileConditionType.LESS_THAN_EQUAL,
+                                property = ProfileConditionValue.VIDEO_BIT_DEPTH,
+                                value = "8",
+                                isRequired = true,
+                            ),
+                        ),
+                    )
+                },
+                subtitleProfiles = DOWNLOAD_SUBTITLE_PROFILES,
+            )
+        }
 
         /**
          * Download profile that forces Dolby Vision through a progressive H.264
